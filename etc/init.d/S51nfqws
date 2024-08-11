@@ -4,116 +4,156 @@
 
 NFQWS_BIN=/opt/usr/bin/nfqws
 
+FontColor_Red="\033[31m"
+FontColor_Green="\033[32m"
+FontColor_Yellow="\033[33m"
+FontColor_Suffix="\033[0m"
+
+log() {
+    LEVEL="$1"
+    MSG="$2"
+    TIMESTAMP=$(date '+%Y-%m-%d %H:%M:%S')
+
+    case "${LEVEL}" in
+        INFO)
+            printf "[${TIMESTAMP}] [${FontColor_Green}${LEVEL}${FontColor_Suffix}] %s\n" "${MSG}" | tee -a "$LOGFILE"
+            ;;
+        WARN)
+            printf "[${TIMESTAMP}] [${FontColor_Yellow}${LEVEL}${FontColor_Suffix}] %s\n" "${MSG}" | tee -a "$LOGFILE"
+            ;;
+        ERROR)
+            printf "[${TIMESTAMP}] [${FontColor_Red}${LEVEL}${FontColor_Suffix}] %s\n" "${MSG}" | tee -a "$LOGFILE" >&2
+            ;;
+        *)
+            printf "[${TIMESTAMP}] %s\n" "${MSG}" | tee -a "$LOGFILE"
+            ;;
+    esac
+}
+
 start() {
-  if [ -f $PIDFILE ] && kill -0 $(cat $PIDFILE); then
-    echo 'Service NFQWS is already running' >&2
-    return 1
-  fi
+    if [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE" 2>/dev/null)"; then
+        log WARN "Service NFQWS is already running"
+        return 1
+    fi
 
-  kernel_modules_load
-  $NFQWS_BIN --daemon --qnum=$NFQUEUE_NUM --pidfile=$PIDFILE $NFQWS_ARGS $NFQWS_EXTRA_ARGS
-  firewall_start
-
-  echo 'Started NFQWS service'
+    kernel_modules_load
+    if $NFQWS_BIN --daemon --qnum="$NFQUEUE_NUM" --pidfile="$PIDFILE" "$NFQWS_ARGS" "$NFQWS_EXTRA_ARGS" >>"$LOGFILE" 2>&1; then
+        firewall_start
+        log INFO "Started NFQWS service"
+    else
+        log ERROR "Failed to start NFQWS service"
+    fi
 }
 
 stop() {
-  firewall_stop
+    firewall_stop
 
-  if [ ! -f "$PIDFILE" ] || ! kill -0 $(cat "$PIDFILE"); then
-    echo 'Service NFQWS is not running' >&2
-    return 1
-  fi
+    if [ ! -f "$PIDFILE" ] || ! kill -0 "$(cat "$PIDFILE" 2>/dev/null)"; then
+        log ERROR "Service NFQWS is not running"
+        return 1
+    fi
 
-  echo 'Stopping NFQWS service...'
-  kill -15 $(cat "$PIDFILE") && rm -f "$PIDFILE"
+    log WARN "Stopping NFQWS service..."
+    if kill -15 "$(cat "$PIDFILE")"; then
+        rm -f "$PIDFILE"
+        log INFO "Stopped NFQWS service"
+    else
+        log ERROR "Failed to stop NFQWS service"
+    fi
 }
 
 reload() {
-  if [ ! -f "$PIDFILE" ] || ! kill -0 $(cat "$PIDFILE"); then
-    echo 'Service NFQWS is not running' >&2
-    return 1
-  fi
+    if [ ! -f "$PIDFILE" ] || ! kill -0 "$(cat "$PIDFILE" 2>/dev/null)"; then
+        log ERROR "Service NFQWS is not running"
+        return 1
+    fi
 
-  echo 'Reloading NFQWS service...'
-  kill -1 $(cat "$PIDFILE")
+    log WARN 'Reloading NFQWS service...'
+    kill -1 "$(cat "$PIDFILE")"
 }
 
 firewall_start() {
-  if [ -z "$(iptables-save 2>/dev/null | grep "queue-num $NFQUEUE_NUM")" ]; then
-    for IFACE in $ISP_INTERFACE; do
-      iptables -t mangle -I POSTROUTING -o $IFACE -p tcp --dport 443 -m connbytes --connbytes-dir=original --connbytes-mode=packets --connbytes 1:8 -m mark ! --mark 0x40000000/0x40000000 -j NFQUEUE --queue-num $NFQUEUE_NUM --queue-bypass
-      iptables -t mangle -I POSTROUTING -o $IFACE -p tcp --dport 80 -m mark ! --mark 0x40000000/0x40000000 -j NFQUEUE --queue-num $NFQUEUE_NUM --queue-bypass
-      #iptables -t mangle -I POSTROUTING -o $IFACE -p udp --dport 443 -m connbytes --connbytes-dir=original --connbytes-mode=packets --connbytes 1:8 -m mark ! --mark 0x40000000/0x40000000 -j NFQUEUE --queue-num 210 --queue-bypass
-      #iptables -t nat -A POSTROUTING -o eth3 -j MASQUERADE
+    if ! iptables-save 2>/dev/null | grep -q "queue-num $NFQUEUE_NUM"; then
+        log WARN "iptables rules not found. Adding..."
+        for IFACE in $ISP_INTERFACE; do
+          iptables -t mangle -I POSTROUTING -o "$IFACE" -p tcp --dport 443 -m connbytes --connbytes-dir=original --connbytes-mode=packets --connbytes 1:8 -m mark ! --mark 0x40000000/0x40000000 -j NFQUEUE --queue-num "$NFQUEUE_NUM" --queue-bypass
+          iptables -t mangle -I POSTROUTING -o "$IFACE" -p tcp --dport 80 -m mark ! --mark 0x40000000/0x40000000 -j NFQUEUE --queue-num "$NFQUEUE_NUM" --queue-bypass
+          #iptables -t mangle -I POSTROUTING -o $IFACE -p udp --dport 443 -m connbytes --connbytes-dir=original --connbytes-mode=packets --connbytes 1:8 -m mark ! --mark 0x40000000/0x40000000 -j NFQUEUE --queue-num 210 --queue-bypass
+          #iptables -t nat -A POSTROUTING -o eth3 -j MASQUERADE
 
-      # Просто чтобы не забыть, правила отсюда https://github.com/bol-van/zapret/issues/191
-      # NB: Тут нет фильтра по интерфейсу
-      #iptables -t mangle -A INPUT -p tcp -m multiport --sports 80,443 -m connbytes --connbytes 1:8 --connbytes-mode packets --connbytes-dir reply -j NFQUEUE --queue-num 200 --queue-bypass
-      #iptables -t mangle -A FORWARD -p tcp -m multiport --sports 80,443 -m connbytes --connbytes 1:8 --connbytes-mode packets --connbytes-dir reply -j NFQUEUE --queue-num 200 --queue-bypass
-      #iptables -t mangle -A POSTROUTING -p tcp -m multiport --dports 80,443 -m connbytes --connbytes 1:8 --connbytes-mode packets --connbytes-dir original -m mark ! --mark 0x40000000/0x40000000 -j NFQUEUE --queue-num 200 --queue-bypass
-    done
-  fi
+          # Просто чтобы не забыть, правила отсюда https://github.com/bol-van/zapret/issues/191
+          # NB: Тут нет фильтра по интерфейсу
+          #iptables -t mangle -A INPUT -p tcp -m multiport --sports 80,443 -m connbytes --connbytes 1:8 --connbytes-mode packets --connbytes-dir reply -j NFQUEUE --queue-num 200 --queue-bypass
+          #iptables -t mangle -A FORWARD -p tcp -m multiport --sports 80,443 -m connbytes --connbytes 1:8 --connbytes-mode packets --connbytes-dir reply -j NFQUEUE --queue-num 200 --queue-bypass
+          #iptables -t mangle -A POSTROUTING -p tcp -m multiport --dports 80,443 -m connbytes --connbytes 1:8 --connbytes-mode packets --connbytes-dir original -m mark ! --mark 0x40000000/0x40000000 -j NFQUEUE --queue-num 200 --queue-bypass
+        done
+    fi
 }
 
 firewall_stop() {
-  if [ -n "$(iptables-save 2>/dev/null | grep "queue-num $NFQUEUE_NUM")" ]; then
-    for IFACE in $ISP_INTERFACE; do
-      iptables -t mangle -D POSTROUTING -o $IFACE -p tcp --dport 443 -m connbytes --connbytes-dir=original --connbytes-mode=packets --connbytes 1:8 -m mark ! --mark 0x40000000/0x40000000 -j NFQUEUE --queue-num $NFQUEUE_NUM --queue-bypass
-      iptables -t mangle -D POSTROUTING -o $IFACE -p tcp --dport 80 -m mark ! --mark 0x40000000/0x40000000 -j NFQUEUE --queue-num $NFQUEUE_NUM --queue-bypass
-      #iptables -t mangle -D POSTROUTING -o $IFACE -p udp --dport 443 -m connbytes --connbytes-dir=original --connbytes-mode=packets --connbytes 1:8 -m mark ! --mark 0x40000000/0x40000000 -j NFQUEUE --queue-num 210 --queue-bypass
-      #iptables -t nat -D POSTROUTING -o eth3 -j MASQUERADE
-    done
-  fi
+    if iptables-save 2>/dev/null | grep -q "queue-num $NFQUEUE_NUM"; then
+        log WARN "Dropping iptables rules before stopping NFQWS service..."
+        for IFACE in $ISP_INTERFACE; do
+          iptables -t mangle -D POSTROUTING -o "$IFACE" -p tcp --dport 443 -m connbytes --connbytes-dir=original --connbytes-mode=packets --connbytes 1:8 -m mark ! --mark 0x40000000/0x40000000 -j NFQUEUE --queue-num "$NFQUEUE_NUM" --queue-bypass
+          iptables -t mangle -D POSTROUTING -o "$IFACE" -p tcp --dport 80 -m mark ! --mark 0x40000000/0x40000000 -j NFQUEUE --queue-num "$NFQUEUE_NUM" --queue-bypass
+          #iptables -t mangle -D POSTROUTING -o $IFACE -p udp --dport 443 -m connbytes --connbytes-dir=original --connbytes-mode=packets --connbytes 1:8 -m mark ! --mark 0x40000000/0x40000000 -j NFQUEUE --queue-num 210 --queue-bypass
+          #iptables -t nat -D POSTROUTING -o eth3 -j MASQUERADE
+        done
+    fi
 }
 
 kernel_modules_load() {
-  KERNEL=$(uname -r)
+  local kernel="$(uname -r)"
+  local modules="xt_multiport xt_connbytes xt_NFQUEUE"
+  local module_path="/lib/modules/$kernel"
 
-  if [ -z "$(lsmod 2>/dev/null | grep "xt_multiport ")" ]; then
-    insmod /lib/modules/$KERNEL/xt_multiport.ko &> /dev/null
-    echo "xt_multiport.ko loaded"
-  fi
+  load_module() {
+    local module="$1"
+    if ! lsmod 2>/dev/null | grep -q "$module"; then
+      insmod "$module_path/$module.ko" &> /dev/null
+      if [ $? -eq 0 ]; then
+        log INFO "$module.ko loaded"
+      else
+        log ERROR "Failed to load $module.ko"
+      fi
+    fi
+  }
 
-  if [ -z "$(lsmod 2>/dev/null | grep "xt_connbytes ")" ]; then
-    insmod /lib/modules/$KERNEL/xt_connbytes.ko &> /dev/null
-    echo "xt_connbytes.ko loaded"
-  fi
-
-  if [ -z "$(lsmod 2>/dev/null | grep "xt_NFQUEUE ")" ]; then
-    insmod /lib/modules/$KERNEL/xt_NFQUEUE.ko &> /dev/null
-    echo "xt_NFQUEUE.ko loaded"
-  fi
+  for module in $modules; do
+    load_module "$module"
+  done
 }
 
+
 status() {
-  if [ -f $PIDFILE ] && kill -0 $(cat $PIDFILE); then
-    echo 'Service NFQWS is running'
-  else
-    echo 'Service NFQWS is stopped'
-  fi
+    if [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE" 2>/dev/null)"; then
+        log INFO "Service NFQWS is running"
+    else
+        log INFO "Service NFQWS is stopped"
+    fi
 }
 
 case "$1" in
-  start)
-    start
-    ;;
-  stop)
-    stop
-    ;;
-  status)
-    status
-    ;;
-  restart)
-    stop
-    start
-    ;;
-  reload)
-    reload
-    ;;
-  firewall)
-    firewall_start
-    ;;
-  *)
-    echo "Usage: $0 {start|stop|restart|reload|status}"
+    start)
+        start
+        ;;
+    stop)
+        stop
+        ;;
+    status)
+        status
+        ;;
+    restart)
+        stop && start
+        ;;
+    reload)
+      reload
+      ;;
+    firewall)
+      firewall_start
+      ;;
+      *)
+      printf "Usage: %s {start|stop|restart|reload|status}\n" "$0"
+      exit 1
+      ;;
 esac

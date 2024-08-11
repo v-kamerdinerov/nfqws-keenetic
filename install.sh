@@ -1,9 +1,9 @@
 #!/bin/sh
 
-ABSOLUTE_FILENAME=`readlink -f "$0"`
-HOME_FOLDER=`dirname "$ABSOLUTE_FILENAME"`
+ABSOLUTE_FILENAME=$(readlink -f "$0")
+HOME_FOLDER=$(dirname "$ABSOLUTE_FILENAME")
 
-source $HOME_FOLDER/common/install_func.sh
+. "$HOME_FOLDER/common/install_func.sh"
 
 # Start installation
 begin_install_func
@@ -36,6 +36,6 @@ config_select_mode_func
 # Starting Services
 start_func
 
-echo "Installation successful"
+log INFO "Installation successful"
 
 exit 0
